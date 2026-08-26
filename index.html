@@ -115,6 +115,7 @@ let state = {
   lanes: [],
   bookings: [],
   tab: "range",
+  editingRange: false,
   loading: true,
   error: "",
   logoBase64: null
@@ -377,9 +378,39 @@ function dashboardView(){
 
 function rangeTabView(){
   const r = state.range;
+  if (state.editingRange){
+    return `
+      <div class="card">
+        <h2>Edit Range Details</h2>
+        <div id="editRangeErr"></div>
+        <label>Range Name</label>
+        <input id="erName" value="${r.name}">
+        <label>Address</label>
+        <textarea id="erAddress">${r.address}</textarea>
+        <label>Contact Number</label>
+        <input id="erContact" value="${r.contactNumber}">
+        <h3 class="section">Banking Details</h3>
+        <label>Account Holder</label>
+        <input id="erHolder" value="${r.bankingDetails?.holder || ''}">
+        <label>Bank Name</label>
+        <input id="erBank" value="${r.bankingDetails?.bank || ''}">
+        <label>Account Number</label>
+        <input id="erAcc" value="${r.bankingDetails?.accountNumber || ''}">
+        <label>Branch Code</label>
+        <input id="erBranch" value="${r.bankingDetails?.branchCode || ''}">
+        <div class="row" style="margin-top:14px;">
+          <button class="btn-secondary" id="cancelEditRangeBtn">Cancel</button>
+          <button class="btn-primary" id="saveRangeBtn" style="margin-top:0;">Save</button>
+        </div>
+      </div>
+    `;
+  }
   return `
     <div class="card">
-      <h2>Range Details</h2>
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2>Range Details</h2>
+        <button class="btn-small btn-secondary" id="editRangeBtn">Edit</button>
+      </div>
       ${r.logoUrl ? `<img src="${r.logoUrl}" class="logo-preview" style="margin-bottom:10px;">` : ""}
       <div class="detail-line"><b>Name:</b> ${r.name}</div>
       <div class="detail-line"><b>Address:</b> ${r.address}</div>
@@ -390,6 +421,21 @@ function rangeTabView(){
       <div class="detail-line"><b>Account:</b> ${r.bankingDetails?.accountNumber || "-"}</div>
       <div class="detail-line"><b>Branch Code:</b> ${r.bankingDetails?.branchCode || "-"}</div>
     </div>
+    <div class="card">
+      <h2>Closed Dates (Maintenance / Days Off)</h2>
+      <div style="font-size:11px; color:var(--muted); margin-bottom:8px;">Clients cannot book any lane on these dates.</div>
+      <div id="closedDatesList">
+        ${(r.closedDates || []).length ? (r.closedDates || []).sort().map(d => `
+          <div class="lane-item">
+            <div class="info"><div class="name">${fmtDate(d)}</div></div>
+            <button class="btn-small btn-danger" data-remove-closed="${d}">✕</button>
+          </div>
+        `).join("") : `<div class="empty">No closed dates set</div>`}
+      </div>
+      <label>Add a closed date</label>
+      <input type="date" id="newClosedDate">
+      <button class="btn-secondary" id="addClosedDateBtn" style="margin-top:10px;">+ Add Closed Date</button>
+    </div>
   `;
 }
 
@@ -397,17 +443,30 @@ function lanesTabView(){
   return `
     <div class="card">
       <h2>Lanes (${state.lanes.length})</h2>
-      ${state.lanes.map(l => `
-        <div class="lane-item">
-          <div class="info">
-            <div class="name">${l.laneName} — ${l.distance}m</div>
-            <div class="meta">${(l.calibers||[]).map(c => `<span class="chip">${c}</span>`).join("")}</div>
+      <div id="lanesListBox">
+        ${state.lanes.map(l => `
+          <div class="lane-item">
+            <div class="info">
+              <div class="name">${l.laneName} — ${l.distance}m</div>
+              <div class="meta">${(l.calibers||[]).map(c => `<span class="chip">${c}</span>`).join("")}</div>
+            </div>
+            <button class="btn-small btn-danger" data-delete-lane="${l.id}">✕</button>
           </div>
-        </div>
-      `).join("") || `<div class="empty">No lanes yet</div>`}
-      <div style="font-size:11px; color:var(--muted); margin-top:10px;">
-        Contact support to edit lanes after initial setup.
+        `).join("") || `<div class="empty">No lanes yet</div>`}
       </div>
+    </div>
+    <div class="card">
+      <h2>Add a Lane</h2>
+      <div id="addLaneErr"></div>
+      <label>Lane Name</label>
+      <input id="dNewLaneName" placeholder="e.g. Bay 3">
+      <label>Distance (metres)</label>
+      <input id="dNewLaneDist" type="number" placeholder="e.g. 50">
+      <label>Allowed Calibers</label>
+      <select id="dNewLaneCal" multiple size="6">
+        ${CALIBERS.map(c => `<option value="${c}">${c}</option>`).join("")}
+      </select>
+      <button class="btn-primary" id="dAddLaneBtn">+ Add Lane</button>
     </div>
   `;
 }
@@ -476,23 +535,107 @@ function statusLabel(status){
 function attachDashboardHandlers(){
   document.getElementById("logoutBtn").onclick = () => auth.signOut();
   document.querySelectorAll("[data-tab]").forEach(btn => {
-    btn.onclick = () => { state.tab = btn.dataset.tab; render(); };
+    btn.onclick = () => { state.tab = btn.dataset.tab; state.editingRange = false; render(); };
   });
   document.querySelectorAll("[data-approve]").forEach(btn => {
     btn.onclick = async () => {
       await db.collection("bookings").doc(btn.dataset.approve).update({
         status: "confirmed", approvedAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      await loadOwnerData();
     };
   });
   document.querySelectorAll("[data-reject]").forEach(btn => {
     btn.onclick = async () => {
       if (!confirm("Reject this booking? The slot will free up.")) return;
       await db.collection("bookings").doc(btn.dataset.reject).update({ status: "cancelled" });
-      await loadOwnerData();
     };
   });
+
+  // Range tab
+  const editBtn = document.getElementById("editRangeBtn");
+  if (editBtn) editBtn.onclick = () => { state.editingRange = true; render(); };
+  const cancelEditBtn = document.getElementById("cancelEditRangeBtn");
+  if (cancelEditBtn) cancelEditBtn.onclick = () => { state.editingRange = false; render(); };
+  const saveRangeBtn = document.getElementById("saveRangeBtn");
+  if (saveRangeBtn) saveRangeBtn.onclick = async () => {
+    const errBox = document.getElementById("editRangeErr");
+    const name = document.getElementById("erName").value.trim();
+    const address = document.getElementById("erAddress").value.trim();
+    const contact = document.getElementById("erContact").value.trim();
+    if (!name || !address || !contact){
+      errBox.innerHTML = `<div class="err">Name, address, and contact are required.</div>`;
+      return;
+    }
+    try{
+      await db.collection("ranges").doc(state.range.id).update({
+        name, address, contactNumber: contact,
+        bankingDetails: {
+          holder: document.getElementById("erHolder").value.trim(),
+          bank: document.getElementById("erBank").value.trim(),
+          accountNumber: document.getElementById("erAcc").value.trim(),
+          branchCode: document.getElementById("erBranch").value.trim()
+        }
+      });
+      state.range = { ...state.range, name, address, contactNumber: contact };
+      state.editingRange = false;
+      await reloadRangeDoc();
+    }catch(e){
+      errBox.innerHTML = `<div class="err">${e.message}</div>`;
+    }
+  };
+  document.querySelectorAll("[data-remove-closed]").forEach(btn => {
+    btn.onclick = async () => {
+      await db.collection("ranges").doc(state.range.id).update({
+        closedDates: firebase.firestore.FieldValue.arrayRemove(btn.dataset.removeClosed)
+      });
+      await reloadRangeDoc();
+    };
+  });
+  const addClosedBtn = document.getElementById("addClosedDateBtn");
+  if (addClosedBtn) addClosedBtn.onclick = async () => {
+    const val = document.getElementById("newClosedDate").value;
+    if (!val) return;
+    await db.collection("ranges").doc(state.range.id).update({
+      closedDates: firebase.firestore.FieldValue.arrayUnion(val)
+    });
+    await reloadRangeDoc();
+  };
+
+  // Lanes tab
+  document.querySelectorAll("[data-delete-lane]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this lane? Existing bookings for it will remain but no new ones can be made.")) return;
+      await db.collection("ranges").doc(state.range.id).collection("lanes").doc(btn.dataset.deleteLane).delete();
+      await reloadLanes();
+    };
+  });
+  const dAddLaneBtn = document.getElementById("dAddLaneBtn");
+  if (dAddLaneBtn) dAddLaneBtn.onclick = async () => {
+    const errBox = document.getElementById("addLaneErr");
+    const name = document.getElementById("dNewLaneName").value.trim();
+    const dist = document.getElementById("dNewLaneDist").value.trim();
+    const calSel = document.getElementById("dNewLaneCal");
+    const cals = Array.from(calSel.selectedOptions).map(o => o.value);
+    if (!name || !dist || cals.length === 0){
+      errBox.innerHTML = `<div class="err">Enter lane name, distance, and select at least one caliber.</div>`;
+      return;
+    }
+    const laneRef = db.collection("ranges").doc(state.range.id).collection("lanes").doc();
+    await laneRef.set({ laneId: laneRef.id, laneName: name, distance: dist, calibers: cals, active: true });
+    await reloadLanes();
+  };
+}
+
+async function reloadRangeDoc(){
+  const doc = await db.collection("ranges").doc(state.range.id).get();
+  state.range = { id: doc.id, ...doc.data() };
+  render();
+}
+
+async function reloadLanes(){
+  const lanesSnap = await db.collection("ranges").doc(state.range.id).collection("lanes").get();
+  state.lanes = lanesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+  render();
 }
 
 // ---------- MASTER VIEW ----------
@@ -521,6 +664,8 @@ function attachHandlers(){
 }
 
 // ---------- DATA LOADING ----------
+let bookingsUnsub = null;
+
 async function loadOwnerData(){
   state.loading = true; state.loadError = ""; render();
   try{
@@ -534,12 +679,18 @@ async function loadOwnerData(){
     const lanesSnap = await db.collection("ranges").doc(state.range.id).collection("lanes").get();
     state.lanes = lanesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    const bookingsSnap = await db.collection("bookings").where("rangeId", "==", state.range.id).get();
-    state.bookings = bookingsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-      .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
-
-    state.loading = false;
-    render();
+    if (bookingsUnsub) bookingsUnsub();
+    bookingsUnsub = db.collection("bookings").where("rangeId", "==", state.range.id)
+      .onSnapshot(snap => {
+        state.bookings = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+          .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
+        state.loading = false;
+        render();
+      }, err => {
+        state.loading = false;
+        state.loadError = err.message;
+        render();
+      });
   }catch(e){
     state.loading = false;
     state.loadError = e.message;
@@ -552,6 +703,7 @@ auth.onAuthStateChanged(async (user) => {
   if (user){
     await loadOwnerData();
   } else {
+    if (bookingsUnsub){ bookingsUnsub(); bookingsUnsub = null; }
     state.range = null; state.lanes = []; state.bookings = [];
     state.loading = false;
     render();
