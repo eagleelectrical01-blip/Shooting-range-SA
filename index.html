@@ -109,6 +109,32 @@ const db = firebase.firestore();
 
 const CALIBERS = [".22LR",".223/5.56",".243",".270",".308",".30-06","9mm",".38 Special",".357 Magnum",".40 S&W",".45 ACP","12 Gauge","Other"];
 
+const OPEN_HOUR = 7, CLOSE_HOUR = 20;
+function generateSlots(){
+  const slots = [];
+  for (let h = OPEN_HOUR; h < CLOSE_HOUR; h++){
+    slots.push(`${String(h).padStart(2,"0")}:00`);
+    slots.push(`${String(h).padStart(2,"0")}:30`);
+  }
+  return slots;
+}
+const ALL_SLOTS = generateSlots();
+function addMinutes(hhmm, mins){
+  const [h,m] = hhmm.split(":").map(Number);
+  const total = h*60 + m + mins;
+  const nh = Math.floor(total/60), nm = total%60;
+  return `${String(nh).padStart(2,"0")}:${String(nm).padStart(2,"0")}`;
+}
+function todayStr(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function isBookingExpired(b){
+  const now = new Date();
+  const endDt = new Date(`${b.date}T${b.endTime}:00`);
+  return endDt < now;
+}
+
 let state = {
   user: null,
   range: null,       // this owner's range doc
@@ -118,7 +144,10 @@ let state = {
   editingRange: false,
   loading: true,
   error: "",
-  logoBase64: null
+  logoBase64: null,
+  availabilityLaneId: null,
+  availabilityDate: todayStr(),
+  availabilitySlotBookings: []
 };
 
 const root = document.getElementById("root");
@@ -357,6 +386,7 @@ function dashboardView(){
   let body = "";
   if (state.tab === "range") body = rangeTabView();
   if (state.tab === "lanes") body = lanesTabView();
+  if (state.tab === "availability") body = availabilityTabView();
   if (state.tab === "bookings") body = bookingsTabView();
 
   return `
@@ -371,6 +401,7 @@ function dashboardView(){
     <div class="tabbar">
       <button class="${state.tab==='range'?'active':''}" data-tab="range"><span class="ic">🏠</span>Range</button>
       <button class="${state.tab==='lanes'?'active':''}" data-tab="lanes"><span class="ic">🎯</span>Lanes</button>
+      <button class="${state.tab==='availability'?'active':''}" data-tab="availability"><span class="ic">🚫</span>Block</button>
       <button class="${state.tab==='bookings'?'active':''}" data-tab="bookings"><span class="ic">📋</span>Bookings</button>
     </div>
   `;
@@ -471,12 +502,57 @@ function lanesTabView(){
   `;
 }
 
+function availabilityTabView(){
+  if (!state.lanes.length){
+    return `<div class="card"><div class="empty">Add a lane first before managing availability.</div></div>`;
+  }
+  const laneId = state.availabilityLaneId || state.lanes[0].id;
+  const isClosedDay = (state.range.closedDates || []).includes(state.availabilityDate);
+
+  const takenSet = new Set();
+  const blockedMap = {};
+  state.availabilitySlotBookings.forEach(b => {
+    let t = b.startTime;
+    while (t !== b.endTime){
+      if (b.status === "blocked") blockedMap[t] = b.id; else takenSet.add(t);
+      t = addMinutes(t, 30);
+    }
+  });
+
+  const slotsHtml = ALL_SLOTS.map(s => {
+    let cls = "slot";
+    let clickable = true;
+    let label = s;
+    if (takenSet.has(s)){ cls += " taken"; clickable = false; label = "Booked"; }
+    else if (blockedMap[s]){ cls += " taken"; clickable = true; label = "Blocked"; }
+    else { cls += " open"; }
+    return `<div class="${cls}" data-avail-slot="${s}" data-blocked-id="${blockedMap[s] || ''}" ${clickable ? "" : "style=\"cursor:not-allowed;\""}>${label}<br><span style="font-size:9px; opacity:.7;">${s}</span></div>`;
+  }).join("");
+
+  return `
+    <div class="card">
+      <h2>Block Slots for Maintenance</h2>
+      <div style="font-size:11px; color:var(--muted); margin-bottom:10px;">Tap an open slot to block it; tap a blocked slot to unblock it. Booked slots can't be changed here.</div>
+      <label>Lane</label>
+      <select id="availLaneSelect">
+        ${state.lanes.map(l => `<option value="${l.id}" ${l.id === laneId ? "selected" : ""}>${l.laneName}</option>`).join("")}
+      </select>
+      <label>Date</label>
+      <input type="date" id="availDateInput" value="${state.availabilityDate}">
+      ${isClosedDay ? `<div class="detail-line" style="color:var(--warn); margin-top:8px;">This whole date is already marked Closed on the Range tab — no bookings possible regardless.</div>` : ""}
+      <div class="slot-grid" style="margin-top:12px;">${slotsHtml}</div>
+    </div>
+  `;
+}
+
 function bookingsTabView(){
-  const pending = state.bookings.filter(b => b.status === "pending_payment" || b.status === "awaiting_approval");
+  const pending = state.bookings.filter(b => (b.status === "pending_payment" || b.status === "awaiting_approval"));
   const confirmed = state.bookings.filter(b => b.status === "confirmed");
   const reschedule = state.bookings.filter(b => b.status === "reschedule_requested");
+  const expiredCount = state.bookings.filter(b => b.status !== "cancelled" && b.status !== "blocked" && isBookingExpired(b)).length;
 
   function bookingCard(b, showApprove){
+    const expired = isBookingExpired(b);
     return `
       <div class="booking-card">
         <div class="top">
@@ -484,23 +560,37 @@ function bookingsTabView(){
             <div class="name">${b.clientName} ${b.clientSurname}</div>
             <div class="slot">${laneNameOf(b.laneId)} · ${fmtDate(b.date)} · ${b.startTime}–${b.endTime}</div>
           </div>
-          <span class="badge ${badgeClass(b.status)}">${statusLabel(b.status)}</span>
+          <div style="display:flex; flex-direction:column; gap:4px; align-items:flex-end;">
+            <span class="badge ${badgeClass(b.status)}">${statusLabel(b.status)}</span>
+            ${expired ? `<span class="badge badge-cancelled">Expired</span>` : ""}
+          </div>
         </div>
         <div class="detail-line"><b>Cell:</b> ${b.clientCell}</div>
         <div class="detail-line"><b>Caliber:</b> ${b.caliber}</div>
         <div class="detail-line"><b>Emergency Contact:</b> ${b.emergencyContactName} — ${b.emergencyContactNumber}</div>
         <div class="detail-line"><b>Medical Aid:</b> ${b.hasMedicalAid ? (b.medicalAidName || "Yes (name not given)") : "None"}</div>
         ${b.paymentProofUrl ? `<img class="proof-img" src="${b.paymentProofUrl}">` : `<div class="detail-line" style="color:var(--danger);">No payment proof uploaded yet</div>`}
-        ${showApprove ? `
+        ${showApprove && !expired ? `
           <div class="actions">
             <button class="btn-small btn-ok" style="flex:1;" data-approve="${b.id}">✓ Approve</button>
             <button class="btn-small btn-danger" style="flex:1;" data-reject="${b.id}">✕ Reject</button>
+          </div>` : ""}
+        ${expired ? `
+          <div class="actions">
+            <button class="btn-small btn-danger" style="flex:1;" data-delete-booking="${b.id}">🗑 Delete Expired</button>
           </div>` : ""}
       </div>
     `;
   }
 
   return `
+    ${expiredCount > 0 ? `
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="detail-line" style="margin:0;"><b>${expiredCount}</b> expired booking(s) across all lanes</div>
+        <button class="btn-small btn-danger" id="clearAllExpiredBtn">Delete All Expired</button>
+      </div>
+    </div>` : ""}
     <div class="card">
       <h2>Pending Approval (${pending.length})</h2>
       ${pending.map(b => bookingCard(b, true)).join("") || `<div class="empty">No pending bookings</div>`}
@@ -535,7 +625,14 @@ function statusLabel(status){
 function attachDashboardHandlers(){
   document.getElementById("logoutBtn").onclick = () => auth.signOut();
   document.querySelectorAll("[data-tab]").forEach(btn => {
-    btn.onclick = () => { state.tab = btn.dataset.tab; state.editingRange = false; render(); };
+    btn.onclick = async () => {
+      state.tab = btn.dataset.tab; state.editingRange = false;
+      if (state.tab === "availability" && state.lanes.length){
+        if (!state.availabilityLaneId) state.availabilityLaneId = state.lanes[0].id;
+        await loadAvailabilitySlots();
+      }
+      render();
+    };
   });
   document.querySelectorAll("[data-approve]").forEach(btn => {
     btn.onclick = async () => {
@@ -624,6 +721,76 @@ function attachDashboardHandlers(){
     await laneRef.set({ laneId: laneRef.id, laneName: name, distance: dist, calibers: cals, active: true });
     await reloadLanes();
   };
+
+  // Availability tab
+  const availLaneSelect = document.getElementById("availLaneSelect");
+  if (availLaneSelect) availLaneSelect.onchange = async () => {
+    state.availabilityLaneId = availLaneSelect.value;
+    await loadAvailabilitySlots();
+    render();
+  };
+  const availDateInput = document.getElementById("availDateInput");
+  if (availDateInput) availDateInput.onchange = async () => {
+    state.availabilityDate = availDateInput.value;
+    await loadAvailabilitySlots();
+    render();
+  };
+  document.querySelectorAll("[data-avail-slot]").forEach(el => {
+    el.onclick = async () => {
+      const slot = el.dataset.availSlot;
+      const blockedId = el.dataset.blockedId;
+      if (blockedId){
+        await db.collection("bookings").doc(blockedId).delete();
+      } else {
+        const laneId = state.availabilityLaneId || state.lanes[0].id;
+        const lane = state.lanes.find(l => l.id === laneId);
+        const ref = db.collection("bookings").doc();
+        await ref.set({
+          bookingId: ref.id,
+          rangeId: state.range.id,
+          rangeName: state.range.name,
+          laneId, laneName: lane ? lane.laneName : "",
+          date: state.availabilityDate,
+          startTime: slot, endTime: addMinutes(slot, 30),
+          status: "blocked",
+          clientUid: state.user.uid,
+          clientName: "Maintenance", clientSurname: "",
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+      await loadAvailabilitySlots();
+      render();
+    };
+  });
+
+  // Bookings tab - expired deletion
+  document.querySelectorAll("[data-delete-booking]").forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm("Delete this expired booking?")) return;
+      await db.collection("bookings").doc(btn.dataset.deleteBooking).delete();
+    };
+  });
+  const clearAllExpiredBtn = document.getElementById("clearAllExpiredBtn");
+  if (clearAllExpiredBtn) clearAllExpiredBtn.onclick = async () => {
+    const expired = state.bookings.filter(b => b.status !== "cancelled" && b.status !== "blocked" && isBookingExpired(b));
+    if (!expired.length) return;
+    if (!confirm(`Delete ${expired.length} expired booking(s)? This cannot be undone.`)) return;
+    const batch = db.batch();
+    expired.forEach(b => batch.delete(db.collection("bookings").doc(b.id)));
+    await batch.commit();
+  };
+}
+
+async function loadAvailabilitySlots(){
+  const laneId = state.availabilityLaneId || (state.lanes[0] && state.lanes[0].id);
+  if (!laneId) return;
+  const snap = await db.collection("bookings")
+    .where("rangeId", "==", state.range.id)
+    .where("laneId", "==", laneId)
+    .where("date", "==", state.availabilityDate)
+    .get();
+  state.availabilitySlotBookings = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .filter(b => b.status === "pending_payment" || b.status === "awaiting_approval" || b.status === "confirmed" || b.status === "blocked");
 }
 
 async function reloadRangeDoc(){
@@ -709,6 +876,14 @@ auth.onAuthStateChanged(async (user) => {
     render();
   }
 });
+
+setInterval(async () => {
+  if (!state.user || !state.range) return;
+  await reloadRangeDoc();
+  await reloadLanes();
+  if (state.tab === "availability") await loadAvailabilitySlots();
+  render();
+}, 15 * 60 * 1000);
 
 render();
 </script>
