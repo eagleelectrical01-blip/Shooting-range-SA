@@ -78,6 +78,7 @@
   .radio-row input{width:auto;}
   .link-btn{background:none; color:var(--accent2); font-size:13px; text-decoration:underline; padding:6px;}
   .proof-preview{width:100%; max-height:160px; object-fit:contain; border-radius:7px; margin-top:8px; border:1px solid var(--border); background:#000;}
+  .waiver-box{background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:12px; margin-top:16px;}
 </style>
 </head>
 <body>
@@ -143,6 +144,10 @@ function todayStr(){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 
+function slotLockId(rangeId, laneId, date, time){
+  return `${rangeId}_${laneId}_${date}_${time.replace(":","")}`;
+}
+
 let state = {
   user: null,
   profile: null,
@@ -181,13 +186,14 @@ function authView(){
     <main>
       <div class="card">
         <h2 id="authTitle">${state.authMode === "login" ? "Log In" : "Create Account"}</h2>
-        <div id="authErrBox">${state.authError ? `<div class="err">${state.authError}</div>` : ""}</div>
+        <div id="authErrBox">${state.authError ? `<div class="err">${state.authError}</div>` : ""}${state.authMsg ? `<div class="msg-ok">${state.authMsg}</div>` : ""}</div>
         <label>Email</label>
-        <input id="authEmail" type="email" placeholder="you@example.com">
+        <input id="authEmail" type="email" placeholder="you@example.com" value="${state.authEmailVal || ''}">
         <label>Password</label>
         <input id="authPass" type="password" placeholder="••••••••">
         <button class="btn-primary" id="authSubmit">${state.authMode === "login" ? "Log In" : "Register"}</button>
         <button class="link-btn" id="authToggle" style="margin-top:10px;">${state.authMode === "login" ? "Don't have an account? Register" : "Already have an account? Log in"}</button>
+        ${state.authMode === "login" ? `<button class="link-btn" id="forgotPassBtn" style="margin-top:4px;">Forgot password?</button>` : ""}
       </div>
     </main>
   `;
@@ -196,13 +202,14 @@ function authView(){
 function attachAuthHandlers(){
   document.getElementById("authToggle").onclick = () => {
     state.authMode = state.authMode === "login" ? "register" : "login";
-    state.authError = "";
+    state.authError = ""; state.authMsg = "";
     render();
   };
   document.getElementById("authSubmit").onclick = async () => {
     const email = document.getElementById("authEmail").value.trim();
     const pass = document.getElementById("authPass").value;
-    if (!email || !pass){ state.authError = "Enter email and password."; render(); return; }
+    state.authEmailVal = email;
+    if (!email || !pass){ state.authError = "Enter email and password."; state.authMsg = ""; render(); return; }
     try{
       if (state.authMode === "login"){
         await auth.signInWithEmailAndPassword(email, pass);
@@ -213,7 +220,21 @@ function attachAuthHandlers(){
         });
       }
     }catch(e){
-      state.authError = e.message;
+      state.authError = e.message; state.authMsg = "";
+      render();
+    }
+  };
+  const forgotBtn = document.getElementById("forgotPassBtn");
+  if (forgotBtn) forgotBtn.onclick = async () => {
+    const email = document.getElementById("authEmail").value.trim();
+    state.authEmailVal = email;
+    if (!email){ state.authError = "Enter your email above first, then tap Forgot password again."; state.authMsg = ""; render(); return; }
+    try{
+      await auth.sendPasswordResetEmail(email);
+      state.authError = ""; state.authMsg = "Password reset email sent — check your inbox.";
+      render();
+    }catch(e){
+      state.authError = e.message; state.authMsg = "";
       render();
     }
   };
@@ -403,6 +424,14 @@ function bookingFormView(){
         <div class="detail-line"><b>Bank:</b> ${r.bankingDetails?.bank || "-"}</div>
         <div class="detail-line"><b>Account:</b> ${r.bankingDetails?.accountNumber || "-"}</div>
         <div class="detail-line"><b>Branch Code:</b> ${r.bankingDetails?.branchCode || "-"}</div>
+        <div class="waiver-box">
+          <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer; margin-top:0;">
+            <input type="checkbox" id="fWaiver" style="width:auto; margin-top:3px;">
+            <span style="font-size:12px; color:var(--text);">
+              I confirm the information above is accurate. I understand that shooting sports carry inherent risk and I accept full responsibility for my safety and conduct at ${r.name}, releasing the range and its staff from liability for injury or loss except where caused by their gross negligence. I consent to my personal information (including medical aid and emergency contact details) being processed and stored solely for the purpose of this booking, in accordance with POPIA.
+            </span>
+          </label>
+        </div>
         <button class="btn-primary" id="submitBookingBtn">Submit Booking</button>
       </div>
     </main>
@@ -600,7 +629,9 @@ function attachMyBookingsHandlers(){
   document.querySelectorAll("[data-cancel]").forEach(btn => {
     btn.onclick = async () => {
       if (!confirm("Cancel this booking?")) return;
+      const booking = state.myBookings.find(b => b.id === btn.dataset.cancel);
       await db.collection("bookings").doc(btn.dataset.cancel).update({ status: "cancelled" });
+      await releaseSlotLocks(booking);
       await loadMyBookings();
       render();
     };
@@ -613,6 +644,24 @@ function attachMyBookingsHandlers(){
       render();
     };
   });
+}
+
+function computeSlotTimes(booking){
+  if (booking.slotTimes) return booking.slotTimes;
+  const times = [];
+  let t = booking.startTime;
+  while (t !== booking.endTime){ times.push(t); t = addMinutes(t, 30); }
+  return times;
+}
+
+async function releaseSlotLocks(booking){
+  if (!booking) return;
+  const times = computeSlotTimes(booking);
+  const batch = db.batch();
+  times.forEach(t => {
+    batch.delete(db.collection("slotLocks").doc(slotLockId(booking.rangeId, booking.laneId, booking.date, t)));
+  });
+  try{ await batch.commit(); }catch(e){}
 }
 
 function compressImageToBase64(file, maxWidth, quality){
@@ -647,6 +696,7 @@ async function submitBooking(){
   const ecNumber = document.getElementById("fEcNumber").value.trim();
   const medAidYes = document.querySelector('input[name="medAid"]:checked').value === "yes";
   const medAidName = medAidYes ? document.getElementById("fMedAidName").value.trim() : "";
+  const waiverAccepted = document.getElementById("fWaiver").checked;
 
   if (!name || !surname || !cell || !caliber || !ecName || !ecNumber){
     errBox.innerHTML = `<div class="err">Please fill in all required fields.</div>`;
@@ -658,28 +708,47 @@ async function submitBooking(){
     errBox.scrollIntoView({ behavior:"smooth", block:"center" });
     return;
   }
+  if (!waiverAccepted){
+    errBox.innerHTML = `<div class="err">Please confirm the waiver and consent checkbox to continue.</div>`;
+    errBox.scrollIntoView({ behavior:"smooth", block:"center" });
+    return;
+  }
 
   const startTime = state.selectedSlots[0];
   const endTime = addMinutes(state.selectedSlots[state.selectedSlots.length-1], 30);
+  const rangeId = state.selectedRange.id, laneId = state.selectedLane.id, date = state.selectedDate;
+  const slotTimes = [...state.selectedSlots];
+
+  const submitBtn = document.getElementById("submitBookingBtn");
+  submitBtn.disabled = true; submitBtn.textContent = "Submitting…";
 
   try{
     const bookingRef = db.collection("bookings").doc();
-    await bookingRef.set({
-      bookingId: bookingRef.id,
-      rangeId: state.selectedRange.id,
-      rangeName: state.selectedRange.name,
-      laneId: state.selectedLane.id,
-      laneName: state.selectedLane.laneName,
-      date: state.selectedDate,
-      startTime, endTime,
-      status: "pending_payment",
-      clientUid: state.user.uid,
-      clientName: name, clientSurname: surname, clientCell: cell,
-      caliber,
-      emergencyContactName: ecName, emergencyContactNumber: ecNumber,
-      hasMedicalAid: medAidYes, medicalAidName: medAidName,
-      paymentProofUrl: state.proofBase64,
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    const lockRefs = slotTimes.map(t => db.collection("slotLocks").doc(slotLockId(rangeId, laneId, date, t)));
+
+    await db.runTransaction(async (tx) => {
+      for (const ref of lockRefs){
+        const snap = await tx.get(ref);
+        if (snap.exists) throw new Error("SLOT_TAKEN");
+      }
+      lockRefs.forEach(ref => {
+        tx.set(ref, { bookingId: bookingRef.id, rangeId, laneId, date, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+      });
+      tx.set(bookingRef, {
+        bookingId: bookingRef.id,
+        rangeId, rangeName: state.selectedRange.name,
+        laneId, laneName: state.selectedLane.laneName,
+        date, startTime, endTime, slotTimes,
+        status: "pending_payment",
+        clientUid: state.user.uid,
+        clientName: name, clientSurname: surname, clientCell: cell,
+        caliber,
+        emergencyContactName: ecName, emergencyContactNumber: ecNumber,
+        hasMedicalAid: medAidYes, medicalAidName: medAidName,
+        paymentProofUrl: state.proofBase64,
+        waiverAccepted: true,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
     });
 
     // save profile for next time
@@ -695,8 +764,18 @@ async function submitBooking(){
     state.view = "myBookings";
     render();
   }catch(e){
-    errBox.innerHTML = `<div class="err">${e.message}</div>`;
-    errBox.scrollIntoView({ behavior:"smooth", block:"center" });
+    submitBtn.disabled = false; submitBtn.textContent = "Submit Booking";
+    if (e.message === "SLOT_TAKEN"){
+      errBox.innerHTML = `<div class="err">Sorry — one of these slots was just booked by someone else. Please pick a different time.</div>`;
+      errBox.scrollIntoView({ behavior:"smooth", block:"center" });
+      await loadSlotBookings();
+      state.selectedSlots = [];
+      state.view = "slotGrid";
+      render();
+    } else {
+      errBox.innerHTML = `<div class="err">${e.message}</div>`;
+      errBox.scrollIntoView({ behavior:"smooth", block:"center" });
+    }
   }
 }
 
