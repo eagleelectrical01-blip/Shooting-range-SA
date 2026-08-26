@@ -159,6 +159,9 @@ function isBookingExpired(b){
   const endDt = new Date(`${b.date}T${b.endTime}:00`);
   return endDt < now;
 }
+function slotLockId(rangeId, laneId, date, time){
+  return `${rangeId}_${laneId}_${date}_${time.replace(":","")}`;
+}
 
 let state = {
   user: null,
@@ -199,6 +202,7 @@ function authView(){
         <input id="authPass" type="password" placeholder="••••••••">
         <button class="btn-primary" id="authSubmit">Log In</button>
         <button class="link-btn" id="authToggle" style="margin-top:10px;">Don't have an account? Register</button>
+        <button class="link-btn" id="forgotPassBtn" style="margin-top:4px;">Forgot password?</button>
       </div>
     </main>
   `;
@@ -228,6 +232,18 @@ function attachAuthHandlers(){
           uid: cred.user.uid, email, role: "owner", createdAt: firebase.firestore.FieldValue.serverTimestamp()
         });
       }
+    }catch(e){
+      errBox.innerHTML = `<div class="err">${e.message}</div>`;
+    }
+  };
+  document.getElementById("forgotPassBtn").onclick = async () => {
+    const email = document.getElementById("authEmail").value.trim();
+    const errBox = document.getElementById("authError");
+    errBox.innerHTML = "";
+    if (!email){ errBox.innerHTML = `<div class="err">Enter your email above first, then tap Forgot password again.</div>`; return; }
+    try{
+      await auth.sendPasswordResetEmail(email);
+      errBox.innerHTML = `<div class="msg-ok">Password reset email sent — check your inbox.</div>`;
     }catch(e){
       errBox.innerHTML = `<div class="err">${e.message}</div>`;
     }
@@ -669,7 +685,9 @@ function attachDashboardHandlers(){
   document.querySelectorAll("[data-reject]").forEach(btn => {
     btn.onclick = async () => {
       if (!confirm("Reject this booking? The slot will free up.")) return;
+      const booking = state.bookings.find(b => b.id === btn.dataset.reject);
       await db.collection("bookings").doc(btn.dataset.reject).update({ status: "cancelled" });
+      await releaseSlotLocks(booking);
     };
   });
 
@@ -765,23 +783,36 @@ function attachDashboardHandlers(){
       const slot = el.dataset.availSlot;
       const blockedId = el.dataset.blockedId;
       if (blockedId){
+        const booking = state.availabilitySlotBookings.find(b => b.id === blockedId);
         await db.collection("bookings").doc(blockedId).delete();
+        await releaseSlotLocks(booking);
       } else {
         const laneId = state.availabilityLaneId || state.lanes[0].id;
         const lane = state.lanes.find(l => l.id === laneId);
-        const ref = db.collection("bookings").doc();
-        await ref.set({
-          bookingId: ref.id,
-          rangeId: state.range.id,
-          rangeName: state.range.name,
-          laneId, laneName: lane ? lane.laneName : "",
-          date: state.availabilityDate,
-          startTime: slot, endTime: addMinutes(slot, 30),
-          status: "blocked",
-          clientUid: state.user.uid,
-          clientName: "Maintenance", clientSurname: "",
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        const lockRef = db.collection("slotLocks").doc(slotLockId(state.range.id, laneId, state.availabilityDate, slot));
+        const bookingRef = db.collection("bookings").doc();
+        try{
+          await db.runTransaction(async (tx) => {
+            const snap = await tx.get(lockRef);
+            if (snap.exists) throw new Error("SLOT_TAKEN");
+            tx.set(lockRef, { bookingId: bookingRef.id, rangeId: state.range.id, laneId, date: state.availabilityDate, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+            tx.set(bookingRef, {
+              bookingId: bookingRef.id,
+              rangeId: state.range.id, rangeName: state.range.name,
+              laneId, laneName: lane ? lane.laneName : "",
+              date: state.availabilityDate,
+              startTime: slot, endTime: addMinutes(slot, 30),
+              slotTimes: [slot],
+              status: "blocked",
+              clientUid: state.user.uid,
+              clientName: "Maintenance", clientSurname: "",
+              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            });
+          });
+        }catch(e){
+          if (e.message === "SLOT_TAKEN") alert("This slot was just booked or blocked. Refreshing.");
+          else alert(e.message);
+        }
       }
       await loadAvailabilitySlots();
       render();
@@ -792,7 +823,9 @@ function attachDashboardHandlers(){
   document.querySelectorAll("[data-delete-booking]").forEach(btn => {
     btn.onclick = async () => {
       if (!confirm("Delete this expired booking?")) return;
+      const booking = state.bookings.find(b => b.id === btn.dataset.deleteBooking);
       await db.collection("bookings").doc(btn.dataset.deleteBooking).delete();
+      await releaseSlotLocks(booking);
     };
   });
   const clearAllExpiredBtn = document.getElementById("clearAllExpiredBtn");
@@ -801,9 +834,30 @@ function attachDashboardHandlers(){
     if (!expired.length) return;
     if (!confirm(`Delete ${expired.length} expired booking(s)? This cannot be undone.`)) return;
     const batch = db.batch();
-    expired.forEach(b => batch.delete(db.collection("bookings").doc(b.id)));
+    expired.forEach(b => {
+      batch.delete(db.collection("bookings").doc(b.id));
+      computeSlotTimes(b).forEach(t => batch.delete(db.collection("slotLocks").doc(slotLockId(b.rangeId, b.laneId, b.date, t))));
+    });
     await batch.commit();
   };
+}
+
+function computeSlotTimes(booking){
+  if (booking.slotTimes) return booking.slotTimes;
+  const times = [];
+  let t = booking.startTime;
+  while (t !== booking.endTime){ times.push(t); t = addMinutes(t, 30); }
+  return times;
+}
+
+async function releaseSlotLocks(booking){
+  if (!booking) return;
+  const times = computeSlotTimes(booking);
+  const batch = db.batch();
+  times.forEach(t => {
+    batch.delete(db.collection("slotLocks").doc(slotLockId(booking.rangeId, booking.laneId, booking.date, t)));
+  });
+  try{ await batch.commit(); }catch(e){}
 }
 
 async function loadAvailabilitySlots(){
