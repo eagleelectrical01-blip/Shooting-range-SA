@@ -496,12 +496,23 @@ function attachDashboardHandlers(){
 // ---------- MASTER VIEW ----------
 function view(){
   if (state.loading) return `<div class="center"><div>Loading…</div></div>`;
+  if (state.loadError) return `<div class="center">
+      <div class="err" style="max-width:320px;">Couldn't load your data:<br>${state.loadError}</div>
+      <button class="btn-secondary" id="retryBtn" style="max-width:200px;">Retry</button>
+      <button class="link-btn" id="logoutRetryBtn">Log out</button>
+    </div>`;
   if (!state.user) return authView();
   if (!state.range) return registerRangeView();
   return dashboardView();
 }
 
 function attachHandlers(){
+  if (state.loading) return;
+  if (state.loadError){
+    document.getElementById("retryBtn").onclick = loadOwnerData;
+    document.getElementById("logoutRetryBtn").onclick = () => auth.signOut();
+    return;
+  }
   if (!state.user) return attachAuthHandlers();
   if (!state.range) return attachRegisterHandlers();
   return attachDashboardHandlers();
@@ -509,23 +520,29 @@ function attachHandlers(){
 
 // ---------- DATA LOADING ----------
 async function loadOwnerData(){
-  state.loading = true; render();
-  const rangeSnap = await db.collection("ranges").where("ownerUid", "==", state.user.uid).limit(1).get();
-  if (rangeSnap.empty){
-    state.range = null; state.loading = false; render(); return;
+  state.loading = true; state.loadError = ""; render();
+  try{
+    const rangeSnap = await db.collection("ranges").where("ownerUid", "==", state.user.uid).limit(1).get();
+    if (rangeSnap.empty){
+      state.range = null; state.loading = false; render(); return;
+    }
+    const rangeDoc = rangeSnap.docs[0];
+    state.range = { id: rangeDoc.id, ...rangeDoc.data() };
+
+    const lanesSnap = await db.collection("ranges").doc(state.range.id).collection("lanes").get();
+    state.lanes = lanesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    const bookingsSnap = await db.collection("bookings").where("rangeId", "==", state.range.id).get();
+    state.bookings = bookingsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
+
+    state.loading = false;
+    render();
+  }catch(e){
+    state.loading = false;
+    state.loadError = e.message;
+    render();
   }
-  const rangeDoc = rangeSnap.docs[0];
-  state.range = { id: rangeDoc.id, ...rangeDoc.data() };
-
-  const lanesSnap = await db.collection("ranges").doc(state.range.id).collection("lanes").get();
-  state.lanes = lanesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-  const bookingsSnap = await db.collection("bookings").where("rangeId", "==", state.range.id).get();
-  state.bookings = bookingsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-    .sort((a,b) => (b.createdAt?.seconds||0) - (a.createdAt?.seconds||0));
-
-  state.loading = false;
-  render();
 }
 
 auth.onAuthStateChanged(async (user) => {
