@@ -53,6 +53,7 @@
   .actions{display:flex; gap:8px; margin-top:10px;}
   .empty{text-align:center; color:var(--muted); font-size:13px; padding:30px 10px;}
   .err{background:#331c1c; border:1px solid var(--danger); color:#e08484; padding:9px 12px; border-radius:7px; font-size:12px; margin-top:10px;}
+  .msg-ok{background:#1c3320; border:1px solid var(--ok); color:#9ed49e; padding:9px 12px; border-radius:7px; font-size:12px; margin-top:10px;}
   .center{display:flex; align-items:center; justify-content:center; min-height:60vh; flex-direction:column; gap:12px; padding:20px;}
   .link-btn{background:none; color:var(--accent2); font-size:13px; text-decoration:underline; padding:6px;}
 </style>
@@ -123,6 +124,7 @@ function authView(){
         <label>Password</label>
         <input id="authPass" type="password" placeholder="••••••••">
         <button class="btn-primary" id="authSubmit">Log In</button>
+        <button class="link-btn" id="forgotPassBtn" style="margin-top:10px;">Forgot password?</button>
       </div>
     </main>
   `;
@@ -137,6 +139,18 @@ function attachAuthHandlers(){
     if (!email || !pass){ errBox.innerHTML = `<div class="err">Enter email and password.</div>`; return; }
     try{
       await auth.signInWithEmailAndPassword(email, pass);
+    }catch(e){
+      errBox.innerHTML = `<div class="err">${e.message}</div>`;
+    }
+  };
+  document.getElementById("forgotPassBtn").onclick = async () => {
+    const email = document.getElementById("authEmail").value.trim();
+    const errBox = document.getElementById("authErrBox");
+    errBox.innerHTML = "";
+    if (!email){ errBox.innerHTML = `<div class="err">Enter your email above first, then tap Forgot password again.</div>`; return; }
+    try{
+      await auth.sendPasswordResetEmail(email);
+      errBox.innerHTML = `<div class="msg-ok">Password reset email sent — check your inbox.</div>`;
     }catch(e){
       errBox.innerHTML = `<div class="err">${e.message}</div>`;
     }
