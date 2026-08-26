@@ -273,6 +273,7 @@ function attachRegisterHandlers(){
 
     if (!name || !address || !contact || pendingLanes.length === 0){
       errBox.innerHTML = `<div class="err">Fill in range name, address, contact, and add at least one lane.</div>`;
+      errBox.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
     try{
@@ -300,6 +301,7 @@ function attachRegisterHandlers(){
       await loadOwnerData();
     }catch(e){
       errBox.innerHTML = `<div class="err">${e.message}</div>`;
+      errBox.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   };
 }
