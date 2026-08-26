@@ -359,6 +359,10 @@ auth.onAuthStateChanged(async (user) => {
   }
 });
 
+setInterval(async () => {
+  if (state.user && ADMIN_EMAILS.includes(state.user.email)) await loadAdminData();
+}, 15 * 60 * 1000);
+
 render();
 </script>
 </body>
