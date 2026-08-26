@@ -271,6 +271,7 @@ function datePickerView(){
       <button class="back-link" id="backToLanes">← Lanes</button>
       <div class="card">
         <h2>Pick a Date</h2>
+        <div id="dateErrBox"></div>
         <label>Date</label>
         <input type="date" id="dateInput" value="${state.selectedDate}" min="${todayStr()}">
         <button class="btn-primary" id="viewSlotsBtn">View Available Times</button>
@@ -496,7 +497,14 @@ function attachLaneListHandlers(){
 function attachDatePickerHandlers(){
   document.getElementById("backToLanes").onclick = () => { state.view = "laneList"; render(); };
   document.getElementById("viewSlotsBtn").onclick = async () => {
-    state.selectedDate = document.getElementById("dateInput").value || todayStr();
+    const chosen = document.getElementById("dateInput").value || todayStr();
+    const closedDates = state.selectedRange.closedDates || [];
+    if (closedDates.includes(chosen)){
+      const errBox = document.getElementById("dateErrBox");
+      if (errBox) errBox.innerHTML = `<div class="err">This range is closed on ${fmtDate(chosen)}. Please choose another date.</div>`;
+      return;
+    }
+    state.selectedDate = chosen;
     state.selectedSlots = [];
     await loadSlotBookings();
     state.view = "slotGrid";
@@ -666,7 +674,7 @@ async function submitBooking(){
 // ---------- DATA LOADING ----------
 async function loadRanges(){
   const snap = await db.collection("ranges").where("status", "==", "approved").get();
-  state.ranges = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  state.ranges = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(r => r.active !== false);
 }
 
 async function loadLanes(rangeId){
